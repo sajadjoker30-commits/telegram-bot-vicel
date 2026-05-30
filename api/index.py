@@ -1,5 +1,5 @@
 from flask import Flask, request
-import telebot, os
+import telebot, os, json
 
 app = Flask(__name__)
 
@@ -9,60 +9,99 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
-# -- لاگ‌های اجباری برای تشخیص مشکل POST --
+# -- تنظیمات کانال ها --
+# *** لطفاً مطمئن شوید که این نام کانال ها دقیقاً درست هستند ***
+TARGET_CHANNEL_USERNAME = "@pouforce" # کانالی که کاربر باید عضو شود
+SOURCE_CHANNEL_USERNAME = "@uploderrrrrr" # کانالی که ویدئو از آن کپی می شود
+
+# -- تعریف مسیر وب هوک --
 @app.route("/", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        return "OK", 200
+        # برای تست اینکه وب هوک فعال است
+        return "Bot is running!", 200
 
-    print("WEBHOOK HIT")
-    json_data = request.get_json(silent=True)
-    print("JSON DATA:", json_data)
+    if request.method == "POST":
+        try:
+            # دریافت داده خام و سپس تبدیل به آبجکت Update
+            update = telebot.types.Update.de_json(request.get_data(as_text=True))
+            bot.process_new_updates([update])
+            return "OK", 200
+        except Exception as e:
+            print(f"Error processing webhook: {e}")
+            return "Internal Server Error", 500
 
-    if not json_data:
-        print("ERROR: No JSON data received")
-        return "Bad Request: No JSON", 400
-
-    try:
-        # --- اصلاح شده ---
-        update = telebot.types.Update.de_json(json_data)
-        # ------------------
-        bot.process_new_updates([update])
-        print("Successfully processed update")
-        return "OK", 200
-    except Exception as e:
-        print(f"ERROR processing update: {e}")
-        return "Internal Server Error", 500
-
-# -- این بخش باید در فایل مجزا یا در انتها باشد تا همه route ها کامل شوند --
-# -- در حال حاضر فقط تست اولیه اتصال با /start را انجام می دهد --
-# -- منطق Force Join و Copy Message باید اضافه شود --
-
+# -- هندلر دستور /start --
 @bot.message_handler(commands=["start"])
-def start(m):
-    print(f"START HANDLER HIT: {m.text} from chat ID: {m.chat.id}")
+def handle_start(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    command_text = message.text
+
+    print(f"Received /start command from chat_id: {chat_id}, user_id: {user_id}, text: {command_text}")
+
+    message_id_to_copy = None
     try:
-        # اینجا باید منطق Force Join و سپس Copy Message بیاید
-        # فعلا فقط یک پیام تست ارسال می کنیم
-        member = bot.get_chat_member("@pouforce", m.from_user.id) # فرض می کنیم @pouforce کانال مقصد است
-        print("MEMBER STATUS:", member.status)
+        # استخراج message_id از دستور /start اگر وجود داشته باشد
+        # فرمت مورد انتظار: /start <message_id> یا /start=MESSAGE_ID
+        parts = command_text.split(' ', 1)
+        if len(parts) > 1:
+            deep_link_param = parts[1]
+            # اگر پارامتر به شکل MESSAGE_ID باشد (مثلا بعد از =)، آن را استخراج می کنیم
+            if '=' in deep_link_param:
+                message_id_to_copy = deep_link_param.split('=', 1)[1]
+            else:
+                # فرض می کنیم خود پارامتر message_id است
+                message_id_to_copy = deep_link_param
+            print(f"Extracted message_id from deep link: {message_id_to_copy}")
 
-        # اگر عضو بود، پیام را کپی کن
-        # این قسمت نیاز به message_id از deep link دارد
-        # برای تست اولیه، یک پیام ثابت را ارسال می کنیم
-        # bot.copy_message(m.chat.id, "@uploderrrrrr", <MESSAGE_ID_HERE>)
+    except Exception as e:
+        print(f"Error extracting message_id from start command: {e}")
+        # اگر نتوانستیم message_id را استخراج کنیم، ربات به کار خود ادامه می دهد اما بدون کپی پیام خاص
 
-        bot.send_message(m.chat.id, "بات آنلاین است و عضویت شما تایید شد. آماده دریافت دستورات هستید.")
-        print(f"Sent confirmation message to chat ID: {m.chat.id}")
+    # --- بخش ۱: بررسی عضویت کاربر ---
+    try:
+        # بررسی عضویت کاربر در کانال مقصد
+        chat_member = bot.get_chat_member(TARGET_CHANNEL_USERNAME, user_id)
+        print(f"User {user_id} status in {TARGET_CHANNEL_USERNAME}: {chat_member.status}")
+
+        # وضعیت های عضویت: 'creator', 'administrator', 'member', 'restricted', 'left', 'kicked'
+        if chat_member.status not in ['creator', 'administrator', 'member']:
+            bot.send_message(chat_id, f"برای استفاده از ربات، لطفاً ابتدا عضو کانال ما شوید:\n{TARGET_CHANNEL_USERNAME}")
+            print(f"User {user_id} is not a member of {TARGET_CHANNEL_USERNAME}. Sent join message.")
+            return # خروج از تابع اگر عضو نیست
 
     except telebot.apihelper.ApiTelegramException as e:
-        print(f"TELEGRAM API ERROR in start handler: {e}")
-        if "bot is not a member" in str(e).lower() or "chat not found" in str(e).lower():
-             bot.send_message(m.chat.id, "خطا: ربات عضو کانال مقصد نیست یا کانال پیدا نشد. لطفاً ربات را ادمین کانال @pouforce کنید.")
-        elif "kicked from" in str(e).lower() or "restricted" in str(e).lower():
-             bot.send_message(m.chat.id, "خطا: ربات از کانال مقصد حذف شده یا دسترسی آن محدود شده است.")
-        else:
-             bot.send_message(m.chat.id, f"خطای تلگرام: {e}")
+        print(f"Telegram API Error checking membership for user {user_id}: {e}")
+        # اگر ربات ادمین نباشد یا کانال private باشد و ربات عضو نباشد، این خطا رخ می دهد
+        bot.send_message(chat_id, f"خطا در بررسی عضویت. لطفاً مطمئن شوید ربات در کانال {TARGET_CHANNEL_USERNAME} حداقل دسترسی لازم را دارد (مثلاً ادمین یا عضو).")
+        return # خروج اگر خطای API رخ داد
     except Exception as e:
-        print(f"GENERAL ERROR in start handler: {e}")
-        bot.send_message(m.chat.id, f"خطای پیش‌بینی نشده: {e}")
+        print(f"General error checking membership for user {user_id}: {e}")
+        bot.send_message(chat_id, "خطای غیرمنتظره در بررسی عضویت.")
+        return # خروج برای خطاهای عمومی
+
+    # --- بخش ۲: اگر کاربر عضو بود، پیام را کپی کن ---
+    if message_id_to_copy:
+        try:
+            print(f"Attempting to copy message {message_id_to_copy} from {SOURCE_CHANNEL_USERNAME} to chat {chat_id}")
+            # کپی کردن پیام از کانال منبع به چت کاربر
+            # این تابع پیام را بدون واترمارک فوروارد ارسال می کند
+            copied_message = bot.copy_message(chat_id, SOURCE_CHANNEL_USERNAME, message_id_to_copy)
+            print(f"Successfully copied message {message_id_to_copy} to chat {chat_id}")
+
+        except telebot.apihelper.ApiTelegramException as e:
+            print(f"Telegram API Error copying message {message_id_to_copy}: {e}")
+            if "message not found" in str(e).lower():
+                bot.send_message(chat_id, "خطا: پیام مورد نظر در کانال منبع یافت نشد. ممکن است شناسه پیام اشتباه باشد یا پیام حذف شده باشد.")
+            elif "chat not found" in str(e).lower() or "bot is not a member" in str(e).lower():
+                 bot.send_message(chat_id, f"خطا: کانال منبع {SOURCE_CHANNEL_USERNAME} یافت نشد، ربات به آن دسترسی ندارد، یا پیام در آن کانال نیست. لطفاً دسترسی ربات به کانال منبع را بررسی کنید.")
+            else:
+                bot.send_message(chat_id, f"خطای تلگرام در ارسال پیام: {e}")
+        except Exception as e:
+            print(f"General error copying message {message_id_to_copy}: {e}")
+            bot.send_message(chat_id, "خطای غیرمنتظره در ارسال پیام.")
+    else:
+        # اگر message_id_to_copy وجود نداشت (یعنی کاربر بدون deep link استارت زد)
+        bot.send_message(chat_id, "عضویت شما تایید شد. برای دریافت ویدئو، لطفاً از لینکی که حاوی شناسه پیام است استفاده کنید.")
+        print(f"User {user_id} is a member but no message_id was provided via deep link.")
